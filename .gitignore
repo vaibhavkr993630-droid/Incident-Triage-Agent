@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Eval run output (raw traces can be large; curated results are committed separately)
+evals/runs/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
