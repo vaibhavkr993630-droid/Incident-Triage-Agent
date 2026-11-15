@@ -30,6 +30,34 @@ loadgen ─► lab services ─► logs (Loki) + metrics (Prometheus) + change l
 | Triage agent | Tool-calling loop with read-only tools, step and token budgets, structured report |
 | Evals | Runs every scenario, scores the agent against the true cause, compares variants |
 
+## The lab
+
+The lab is the system the agent investigates. It runs with Docker Compose:
+
+```bash
+docker compose up -d --build --wait
+```
+
+| Service | Role | Port |
+|---|---|---|
+| `shop-api` | FastAPI shop: products (cached in Redis), orders (charged through the payment provider, written to Postgres, queued for fulfillment) | 8000 |
+| `payment-provider` | Mock third-party payment API | 8001 |
+| `worker` | Takes fulfillment jobs off the Redis queue and marks orders fulfilled; restocks inventory | 9100 (metrics) |
+| `loadgen` | Steady traffic, about 5 requests/second (mostly reads, some orders) | - |
+| `postgres`, `redis` | Database and cache/queue | internal |
+
+Every service writes one JSON object per log line (`ts`, `level`, `service`, `logger`, `msg`,
+plus structured fields) and exposes Prometheus metrics: request rate and latency by route
+template, database query latency and pool usage, cache hits and errors, payment outcomes and
+latency, and worker job outcomes and queue depth. These logs and metrics are what the agent's
+tools will read.
+
+A dependency failure degrades the system in a visible way instead of crashing it. For example,
+with Redis stopped, reads fall back to Postgres with a logged warning, fulfillment jobs fail to
+enqueue with a logged error, and `/health` returns 503 naming Redis.
+
+The whole stack uses about 310 MB of RAM.
+
 ## Development
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
@@ -38,7 +66,8 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 uv sync
 uv run ruff check .
 uv run ruff format --check .
-uv run pytest
+uv run pytest                    # unit tests
+uv run pytest -m integration     # against the running lab stack
 ```
 
 ## License

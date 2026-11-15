@@ -1,0 +1,105 @@
+# The lab: the system the triage agent investigates.
+# Memory limits keep the whole stack small enough for a laptop.
+
+x-lab-env: &lab-env
+  DATABASE_URL: postgresql+asyncpg://shop:shop@postgres:5432/shop
+  REDIS_URL: redis://redis:6379/0
+  PAYMENT_URL: http://payment-provider:8001
+  LOG_LEVEL: INFO
+
+x-lab-build: &lab-build
+  context: .
+  dockerfile: lab/Dockerfile
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+      POSTGRES_DB: shop
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop -d shop"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+
+  payment-provider:
+    build: *lab-build
+    image: incident-lab:local
+    command: ["uvicorn", "lab.payment_provider.app:app", "--host", "0.0.0.0", "--port", "8001"]
+    environment: *lab-env
+    ports: ["8001:8001"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
+  shop-api:
+    build: *lab-build
+    image: incident-lab:local
+    command: ["uvicorn", "lab.shop_api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *lab-env
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      payment-provider: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: 160m
+
+  worker:
+    build: *lab-build
+    image: incident-lab:local
+    command: ["python", "-m", "lab.worker.main"]
+    environment: *lab-env
+    ports: ["9100:9100"]
+    depends_on:
+      shop-api: { condition: service_healthy }
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
+  loadgen:
+    build: *lab-build
+    image: incident-lab:local
+    command: ["python", "-m", "lab.loadgen.main"]
+    environment:
+      SHOP_URL: http://shop-api:8000
+      LOADGEN_RPS: "5"
+    depends_on:
+      shop-api: { condition: service_healthy }
+    deploy:
+      resources:
+        limits:
+          memory: 96m

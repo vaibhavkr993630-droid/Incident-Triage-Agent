@@ -1,0 +1,314 @@
+"""Shop API: the main lab service.
+
+Request paths, and which dependency each one touches:
+
+    GET  /products            -> Redis cache, else Postgres
+    GET  /products/{id}       -> Redis cache, else Postgres
+    POST /orders              -> product lookup -> payment provider -> Postgres write -> Redis queue
+    GET  /orders/{id}         -> Postgres
+    GET  /health              -> Postgres + Redis ping
+
+Every dependency failure is logged with a clear message and counted in a metric, because the
+triage agent will later have to find failures from exactly these logs and metrics.
+"""
+
+import json
+import logging
+import time
+from contextlib import asynccontextmanager
+
+import httpx
+import redis.asyncio as redis
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from prometheus_client import Counter, Gauge, Histogram
+from pydantic import BaseModel, Field
+from sqlalchemy import text
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
+from lab.common.db import init_schema, make_engine, wait_for_database
+from lab.common.http import install_http_middleware
+from lab.common.log_setup import setup_logging
+from lab.common.settings import load_settings
+
+SERVICE = "shop-api"
+FULFILLMENT_QUEUE = "fulfillment"
+
+settings = load_settings()
+setup_logging(SERVICE, settings.log_level)
+log = logging.getLogger("shop_api")
+
+CACHE_REQUESTS = Counter("cache_requests_total", "Cache lookups by result.", ["result"])
+DB_QUERY_DURATION = Histogram(
+    "db_query_duration_seconds",
+    "Database query latency, by query name.",
+    ["query"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+DB_POOL_TIMEOUTS = Counter(
+    "db_pool_timeouts_total", "Requests that waited too long for a DB connection."
+)
+DB_POOL_CHECKED_OUT = Gauge("db_pool_checked_out", "Database connections currently in use.")
+DB_POOL_SIZE = Gauge("db_pool_size", "Configured database pool size.")
+PAYMENT_REQUESTS = Counter("payment_requests_total", "Calls to the payment provider.", ["outcome"])
+PAYMENT_DURATION = Histogram(
+    "payment_request_duration_seconds",
+    "Payment provider latency.",
+    buckets=(0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0),
+)
+ORDERS = Counter("orders_total", "Order attempts by outcome.", ["outcome"])
+QUEUE_PUBLISH_ERRORS = Counter("queue_publish_errors_total", "Failed fulfillment-job publishes.")
+
+
+class OrderIn(BaseModel):
+    product_id: int = Field(gt=0)
+    quantity: int = Field(gt=0, le=10)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    engine = make_engine(settings)
+    await wait_for_database(engine)
+    await init_schema(engine)
+    app.state.engine = engine
+    app.state.redis = redis.from_url(
+        settings.redis_url, socket_timeout=0.5, socket_connect_timeout=0.5
+    )
+    app.state.payments = httpx.AsyncClient(
+        base_url=settings.payment_url, timeout=settings.payment_timeout
+    )
+    pool = engine.sync_engine.pool
+    DB_POOL_SIZE.set(settings.db_pool_size)
+    DB_POOL_CHECKED_OUT.set_function(pool.checkedout)
+    log.info("shop-api started", extra={"fields": {"db_pool_size": settings.db_pool_size}})
+    yield
+    await app.state.payments.aclose()
+    await app.state.redis.aclose()
+    await engine.dispose()
+
+
+app = FastAPI(title="Lab shop API", lifespan=lifespan)
+install_http_middleware(app)
+
+
+@app.exception_handler(PoolTimeoutError)
+async def pool_timeout_handler(request: Request, exc: PoolTimeoutError) -> JSONResponse:
+    DB_POOL_TIMEOUTS.inc()
+    log.error(
+        "database connection pool exhausted",
+        extra={
+            "fields": {
+                "route": request.url.path,
+                "pool_size": settings.db_pool_size,
+                "pool_timeout_s": settings.db_pool_timeout,
+            }
+        },
+    )
+    return JSONResponse({"detail": "database unavailable"}, status_code=503)
+
+
+async def run_query(request: Request, name: str, sql: str, params: dict | None = None):
+    start = time.perf_counter()
+    async with request.app.state.engine.connect() as conn:
+        result = await conn.execute(text(sql), params or {})
+        rows = [dict(r._mapping) for r in result]
+    elapsed = time.perf_counter() - start
+    DB_QUERY_DURATION.labels(name).observe(elapsed)
+    if elapsed > 0.5:
+        log.warning(
+            "slow database query",
+            extra={"fields": {"query": name, "duration_ms": round(elapsed * 1000, 1)}},
+        )
+    return rows
+
+
+async def cache_get(request: Request, key: str):
+    try:
+        raw = await request.app.state.redis.get(key)
+    except redis.RedisError as exc:
+        CACHE_REQUESTS.labels("error").inc()
+        log.warning(
+            "cache read failed, falling back to database",
+            extra={"fields": {"key": key, "error": type(exc).__name__}},
+        )
+        return None
+    CACHE_REQUESTS.labels("hit" if raw is not None else "miss").inc()
+    return json.loads(raw) if raw is not None else None
+
+
+async def cache_set(request: Request, key: str, value) -> None:
+    try:
+        await request.app.state.redis.set(key, json.dumps(value), ex=settings.cache_ttl_seconds)
+    except redis.RedisError as exc:
+        log.warning(
+            "cache write failed", extra={"fields": {"key": key, "error": type(exc).__name__}}
+        )
+
+
+async def get_product(request: Request, product_id: int) -> dict:
+    key = f"product:{product_id}"
+    product = await cache_get(request, key)
+    if product is None:
+        rows = await run_query(
+            request,
+            "product_by_id",
+            "SELECT id, name, price_cents, stock FROM products WHERE id = :id",
+            {"id": product_id},
+        )
+        if not rows:
+            raise HTTPException(404, "product not found")
+        product = rows[0]
+        await cache_set(request, key, product)
+    return product
+
+
+@app.get("/products")
+async def list_products(request: Request):
+    products = await cache_get(request, "products:all")
+    if products is None:
+        products = await run_query(
+            request,
+            "list_products",
+            "SELECT id, name, price_cents, stock FROM products ORDER BY id",
+        )
+        await cache_set(request, "products:all", products)
+    return products
+
+
+@app.get("/products/{product_id}")
+async def read_product(request: Request, product_id: int):
+    return await get_product(request, product_id)
+
+
+async def charge(request: Request, amount_cents: int, product_id: int) -> str:
+    start = time.perf_counter()
+    try:
+        resp = await request.app.state.payments.post(
+            "/charge", json={"amount_cents": amount_cents, "reference": f"product-{product_id}"}
+        )
+    except httpx.TimeoutException:
+        PAYMENT_REQUESTS.labels("timeout").inc()
+        log.error(
+            "payment provider timed out",
+            extra={"fields": {"timeout_s": settings.payment_timeout, "amount_cents": amount_cents}},
+        )
+        raise HTTPException(504, "payment provider timed out") from None
+    except httpx.HTTPError as exc:
+        PAYMENT_REQUESTS.labels("unreachable").inc()
+        log.error("payment provider unreachable", extra={"fields": {"error": type(exc).__name__}})
+        raise HTTPException(502, "payment provider unreachable") from None
+    finally:
+        PAYMENT_DURATION.observe(time.perf_counter() - start)
+
+    if resp.status_code != 200:
+        PAYMENT_REQUESTS.labels("error").inc()
+        log.error(
+            "payment provider returned an error",
+            extra={"fields": {"provider_status": resp.status_code}},
+        )
+        raise HTTPException(502, "payment failed")
+    PAYMENT_REQUESTS.labels("approved").inc()
+    return resp.json()["charge_id"]
+
+
+async def refund(request: Request, charge_id: str) -> None:
+    try:
+        await request.app.state.payments.post("/refund", json={"charge_id": charge_id})
+    except httpx.HTTPError as exc:
+        log.error(
+            "refund failed",
+            extra={"fields": {"charge_id": charge_id, "error": type(exc).__name__}},
+        )
+
+
+@app.post("/orders", status_code=201)
+async def create_order(request: Request, order: OrderIn):
+    product = await get_product(request, order.product_id)
+    amount = product["price_cents"] * order.quantity
+
+    # Charge before touching the database, so no DB connection is held while waiting on an
+    # external service. If the stock check then fails, the charge is refunded.
+    charge_id = await charge(request, amount, order.product_id)
+
+    start = time.perf_counter()
+    order_id = None
+    async with request.app.state.engine.begin() as conn:
+        updated = await conn.execute(
+            text(
+                "UPDATE products SET stock = stock - :q WHERE id = :id AND stock >= :q "
+                "RETURNING stock"
+            ),
+            {"q": order.quantity, "id": order.product_id},
+        )
+        if updated.first() is not None:
+            order_id = (
+                await conn.execute(
+                    text(
+                        "INSERT INTO orders "
+                        "(product_id, quantity, amount_cents, status, charge_id) "
+                        "VALUES (:p, :q, :a, 'paid', :c) RETURNING id"
+                    ),
+                    {"p": order.product_id, "q": order.quantity, "a": amount, "c": charge_id},
+                )
+            ).scalar_one()
+    DB_QUERY_DURATION.labels("create_order").observe(time.perf_counter() - start)
+
+    if order_id is None:
+        # The transaction is closed here, so the refund call holds no DB connection.
+        ORDERS.labels("out_of_stock").inc()
+        await refund(request, charge_id)
+        log.info("order rejected: out of stock", extra={"fields": {"product_id": order.product_id}})
+        raise HTTPException(409, "out of stock")
+
+    try:
+        await request.app.state.redis.lpush(FULFILLMENT_QUEUE, json.dumps({"order_id": order_id}))
+    except redis.RedisError as exc:
+        QUEUE_PUBLISH_ERRORS.inc()
+        log.error(
+            "failed to enqueue fulfillment job",
+            extra={"fields": {"order_id": order_id, "error": type(exc).__name__}},
+        )
+
+    ORDERS.labels("created").inc()
+    log.info(
+        "order created",
+        extra={
+            "fields": {"order_id": order_id, "product_id": order.product_id, "amount_cents": amount}
+        },
+    )
+    return {"id": order_id, "status": "paid", "amount_cents": amount}
+
+
+@app.get("/orders/{order_id}")
+async def read_order(request: Request, order_id: int):
+    rows = await run_query(
+        request,
+        "order_by_id",
+        "SELECT id, product_id, quantity, amount_cents, status, created_at, fulfilled_at "
+        "FROM orders WHERE id = :id",
+        {"id": order_id},
+    )
+    if not rows:
+        raise HTTPException(404, "order not found")
+    return rows[0]
+
+
+@app.get("/health")
+async def health(request: Request):
+    checks = {}
+    try:
+        async with request.app.state.engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        checks["postgres"] = "ok"
+    except Exception as exc:  # noqa: BLE001 - health reports any failure
+        checks["postgres"] = f"error: {type(exc).__name__}"
+    try:
+        await request.app.state.redis.ping()
+        checks["redis"] = "ok"
+    except redis.RedisError as exc:
+        checks["redis"] = f"error: {type(exc).__name__}"
+    healthy = all(v == "ok" for v in checks.values())
+    return JSONResponse(
+        {"status": "ok" if healthy else "degraded", "checks": checks},
+        status_code=200 if healthy else 503,
+    )
