@@ -6,8 +6,10 @@ reads them back through a tool, so the field names here are a contract:
 ``extra={"fields": {...}}``.
 """
 
+import atexit
 import json
 import logging
+import os
 import sys
 from datetime import UTC, datetime
 
@@ -35,11 +37,26 @@ class JsonFormatter(logging.Formatter):
 
 
 def setup_logging(service: str, level: str = "INFO") -> None:
-    """Send every log record (ours and the libraries') to stdout as JSON."""
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(JsonFormatter(service))
+    """Send every log record (ours and the libraries') to stdout as JSON.
+
+    When ``LOKI_URL`` is set, the same JSON lines are also pushed to Loki.
+    """
+    formatter = JsonFormatter(service)
+    stdout = logging.StreamHandler(sys.stdout)
+    stdout.setFormatter(formatter)
+    handlers: list[logging.Handler] = [stdout]
+
+    loki_url = os.environ.get("LOKI_URL")
+    if loki_url:
+        from lab.common.loki import LokiHandler
+
+        loki = LokiHandler(loki_url, service)
+        loki.setFormatter(formatter)
+        handlers.append(loki)
+        atexit.register(loki.close)
+
     root = logging.getLogger()
-    root.handlers[:] = [handler]
+    root.handlers[:] = handlers
     root.setLevel(level)
     # Our middleware logs each request with more detail than uvicorn's access log.
     logging.getLogger("uvicorn.access").disabled = True

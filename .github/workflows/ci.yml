@@ -48,8 +48,8 @@ jobs:
       - name: Start the lab stack
         run: docker compose up -d --build --wait
 
-      - name: Let the load generator run
-        run: sleep 15
+      - name: Let the load generator run (Prometheus needs a few scrapes for rates)
+        run: sleep 20
 
       - name: Integration tests
         run: uv run pytest -m integration

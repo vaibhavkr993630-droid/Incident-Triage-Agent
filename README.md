@@ -45,6 +45,7 @@ docker compose up -d --build --wait
 | `worker` | Takes fulfillment jobs off the Redis queue and marks orders fulfilled; restocks inventory | 9100 (metrics) |
 | `loadgen` | Steady traffic, about 5 requests/second (mostly reads, some orders) | - |
 | `postgres`, `redis` | Database and cache/queue | internal |
+| `prometheus`, `loki` | Metrics and logs (see [Telemetry](#telemetry)) | 9090, 3100 |
 
 Every service writes one JSON object per log line (`ts`, `level`, `service`, `logger`, `msg`,
 plus structured fields) and exposes Prometheus metrics: request rate and latency by route
@@ -56,7 +57,23 @@ A dependency failure degrades the system in a visible way instead of crashing it
 with Redis stopped, reads fall back to Postgres with a logged warning, fulfillment jobs fail to
 enqueue with a logged error, and `/health` returns 503 naming Redis.
 
-The whole stack uses about 310 MB of RAM.
+## Telemetry
+
+The agent will never read container output directly. It queries the same two systems an
+on-call engineer would:
+
+| System | Holds | Example query |
+|---|---|---|
+| Prometheus (`:9090`) | Metrics scraped every 5 s from `shop-api`, `payment-provider` and `worker`. The Prometheus `job` label is the service name. | `sum by (route) (rate(http_requests_total{job="shop-api"}[1m]))` |
+| Loki (`:3100`) | Every service's JSON log lines, labelled only by `service` and `level`. Other fields are filtered at query time. | `{service="shop-api"} \| json \| route="/orders" \| status="500"` |
+
+Logs are pushed to Loki from inside each service by a small batching handler
+(`lab/common/loki.py`), rather than by a separate log-collector container. That saves memory
+on a laptop and behaves the same in CI. The handler never blocks or raises: if Loki is down,
+requests are unaffected, and lost lines are counted in `log_shipping_dropped_total`. A
+production setup would usually run a collector such as Grafana Alloy instead.
+
+The whole stack, telemetry included, uses about 475 MB of RAM.
 
 ## Development
 

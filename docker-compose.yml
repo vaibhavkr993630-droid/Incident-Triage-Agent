@@ -5,6 +5,7 @@ x-lab-env: &lab-env
   DATABASE_URL: postgresql+asyncpg://shop:shop@postgres:5432/shop
   REDIS_URL: redis://redis:6379/0
   PAYMENT_URL: http://payment-provider:8001
+  LOKI_URL: http://loki:3100
   LOG_LEVEL: INFO
 
 x-lab-build: &lab-build
@@ -12,6 +13,43 @@ x-lab-build: &lab-build
   dockerfile: lab/Dockerfile
 
 services:
+  # ---- Telemetry: what the triage agent reads -------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+      - --web.enable-lifecycle
+    volumes:
+      - ./telemetry/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 192m
+
+  loki:
+    image: grafana/loki:3.5.0
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./telemetry/loki.yml:/etc/loki/loki.yml:ro
+    ports: ["3100:3100"]
+    healthcheck:
+      test: ["CMD", "/busybox/wget", "-qO-", "http://localhost:3100/ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    deploy:
+      resources:
+        limits:
+          memory: 320m
+
+  # ---- The lab: the system under investigation ------------------------------------------
   postgres:
     image: postgres:16-alpine
     environment:
@@ -47,6 +85,8 @@ services:
     command: ["uvicorn", "lab.payment_provider.app:app", "--host", "0.0.0.0", "--port", "8001"]
     environment: *lab-env
     ports: ["8001:8001"]
+    depends_on:
+      loki: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 3s
@@ -67,6 +107,7 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       payment-provider: { condition: service_healthy }
+      loki: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 3s
@@ -96,6 +137,7 @@ services:
     command: ["python", "-m", "lab.loadgen.main"]
     environment:
       SHOP_URL: http://shop-api:8000
+      LOKI_URL: http://loki:3100
       LOADGEN_RPS: "5"
     depends_on:
       shop-api: { condition: service_healthy }
