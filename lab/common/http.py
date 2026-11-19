@@ -46,7 +46,8 @@ def install_http_middleware(app: FastAPI) -> None:
         finally:
             elapsed = time.perf_counter() - start
             route = route_template(request)
-            if route != "/metrics":
+            # /metrics is scrape noise; /_* is the lab's silent control plane (faults, changes).
+            if route != "/metrics" and not route.startswith("/_"):
                 HTTP_REQUESTS.labels(route, request.method, str(status)).inc()
                 HTTP_DURATION.labels(route, request.method).observe(elapsed)
                 level = logging.ERROR if status >= 500 else logging.INFO

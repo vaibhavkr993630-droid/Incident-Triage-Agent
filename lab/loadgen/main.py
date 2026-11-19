@@ -26,11 +26,14 @@ log = logging.getLogger("loadgen")
 
 
 def pick_request() -> tuple[str, str, dict | None]:
+    """40% product page, 15% product list, 15% product stats, 30% orders."""
     roll = random.random()
-    if roll < 0.5:
+    if roll < 0.40:
         return "GET", f"/products/{random.choice(PRODUCT_IDS)}", None
-    if roll < 0.7:
+    if roll < 0.55:
         return "GET", "/products", None
+    if roll < 0.70:
+        return "GET", f"/products/{random.choice(PRODUCT_IDS)}/stats", None
     return (
         "POST",
         "/orders",

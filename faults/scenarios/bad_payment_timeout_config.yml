@@ -1,0 +1,49 @@
+id: bad_payment_timeout_config
+title: Config change sets the payment timeout far below the provider's normal latency
+alert: >-
+  Checkout errors: more than 5% of POST /orders requests have failed with 5xx over the last 2 minutes.
+ground_truth:
+  category: bad_config_change
+  component: shop-api
+  key_evidence:
+    - a recent shop-api config change lowered PAYMENT_TIMEOUT from 2.0s to 0.03s, just before the errors began
+    - shop-api logs "payment provider timed out" with timeout_s 0.03
+    - the payment provider's own /charge latency is normal (well under 100 ms)
+inject:
+  - type: http
+    service: shop-api
+    method: PUT
+    path: /_faults
+    json: {payment_timeout_s: 0.03}
+  - type: http
+    service: shop-api
+    method: POST
+    path: /_changes
+    json:
+      service: shop-api
+      kind: config
+      summary: Lower PAYMENT_TIMEOUT from 2.0s to 0.03s to cut checkout tail latency
+      details: {setting: PAYMENT_TIMEOUT, old: "2.0", new: "0.03"}
+recover:
+  - type: http
+    service: shop-api
+    method: DELETE
+    path: /_faults
+  - type: sql
+    statement: DELETE FROM changes WHERE source = 'scenario'
+signals:
+  - description: payment calls time out
+    source: prometheus
+    query: 'sum(rate(payment_requests_total{job="shop-api",outcome="timeout"}[30s]))'
+    op: ">"
+    value: 0.2
+  - description: timeouts are logged with a tiny timeout value
+    source: loki
+    query: 'sum(count_over_time({service="shop-api"} |= "payment provider timed out" | json | timeout_s < 0.1 [30s]))'
+    op: ">="
+    value: 3
+  - description: the provider itself is fast
+    source: prometheus
+    query: 'histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job="payment-provider",route="/charge"}[30s])))'
+    op: "<"
+    value: 0.15

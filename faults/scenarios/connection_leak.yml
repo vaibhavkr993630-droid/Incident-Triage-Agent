@@ -1,0 +1,39 @@
+id: connection_leak
+title: Code path leaks database connections until the pool is exhausted
+alert: >-
+  shop-api availability: /health is failing and more than 5% of requests have returned 5xx
+  over the last 2 minutes.
+ground_truth:
+  category: db_pool_exhausted
+  component: shop-api
+  key_evidence:
+    - shop-api logs "database connection pool exhausted" errors
+    - db_pool_checked_out stays at the pool size (5) while traffic is normal
+    - cached reads that need no database connection still succeed
+inject:
+  - type: http
+    service: shop-api
+    method: PUT
+    path: /_faults
+    json: {db_connection_leak: {count: 5, hold_seconds: 900}}
+recover:
+  - type: http
+    service: shop-api
+    method: DELETE
+    path: /_faults
+signals:
+  - description: every pooled connection is checked out
+    source: prometheus
+    query: 'max(db_pool_checked_out{job="shop-api"})'
+    op: ">="
+    value: 5
+  - description: requests time out waiting for a connection
+    source: prometheus
+    query: 'sum(rate(db_pool_timeouts_total{job="shop-api"}[30s]))'
+    op: ">"
+    value: 0.2
+  - description: shop-api logs pool exhaustion
+    source: loki
+    query: 'sum(count_over_time({service="shop-api"} |= "database connection pool exhausted" [30s]))'
+    op: ">="
+    value: 5

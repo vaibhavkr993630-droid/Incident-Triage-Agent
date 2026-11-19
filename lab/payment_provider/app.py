@@ -1,7 +1,7 @@
 """Mock payment provider: an external dependency of the shop API.
 
-It approves every charge after a short, realistic delay. Phase 3 adds fault flags here
-(slow responses, error responses) to simulate a third-party outage.
+Healthy, it approves every charge after a short, realistic delay. Its fault flags simulate a
+third-party outage: extra latency, or a share of requests failing with HTTP 500.
 """
 
 import asyncio
@@ -9,9 +9,10 @@ import logging
 import random
 import uuid
 
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
 
+from lab.common.faults import FaultStore, install_fault_routes
 from lab.common.http import install_http_middleware
 from lab.common.log_setup import setup_logging
 from lab.common.settings import load_settings
@@ -22,8 +23,18 @@ settings = load_settings()
 setup_logging(SERVICE, settings.log_level)
 log = logging.getLogger("payment_provider")
 
+
+class ProviderFaults(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    latency_ms: int = Field(default=0, ge=0, le=30_000)
+    error_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+faults = FaultStore(ProviderFaults)
+
 app = FastAPI(title="Lab payment provider")
 install_http_middleware(app)
+install_fault_routes(app, faults)
 
 
 class ChargeIn(BaseModel):
@@ -37,7 +48,14 @@ class RefundIn(BaseModel):
 
 @app.post("/charge")
 async def charge(body: ChargeIn):
-    await asyncio.sleep(random.uniform(0.02, 0.08))
+    flags = faults.current
+    await asyncio.sleep(random.uniform(0.02, 0.08) + flags.latency_ms / 1000)
+    if flags.error_rate and random.random() < flags.error_rate:
+        log.error(
+            "charge failed: card processor unavailable",
+            extra={"fields": {"amount_cents": body.amount_cents, "reference": body.reference}},
+        )
+        raise HTTPException(500, "card processor unavailable")
     charge_id = f"ch_{uuid.uuid4().hex[:12]}"
     log.info(
         "charge approved",

@@ -2,37 +2,50 @@
 
 Request paths, and which dependency each one touches:
 
-    GET  /products            -> Redis cache, else Postgres
-    GET  /products/{id}       -> Redis cache, else Postgres
-    POST /orders              -> product lookup -> payment provider -> Postgres write -> Redis queue
-    GET  /orders/{id}         -> Postgres
-    GET  /health              -> Postgres + Redis ping
+    GET  /products                  -> Redis cache, else Postgres
+    GET  /products/{id}             -> Redis cache, else Postgres
+    GET  /products/{id}/stats       -> Postgres (orders in the last 24 h; needs the stats index)
+    POST /orders                    -> product lookup -> payment provider -> Postgres write
+                                       -> Redis queue
+    GET  /orders/{id}               -> Postgres
+    GET  /health                    -> Postgres + Redis ping
+
+Control plane (silent, never logged; see lab/common/faults.py):
+
+    GET/PUT/DELETE /_faults         fault flags for this service
+    GET/POST       /_changes        deploy and config-change history
 
 Every dependency failure is logged with a clear message and counted in a metric, because the
 triage agent will later have to find failures from exactly these logs and metrics.
 """
 
+import asyncio
 import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import httpx
 import redis.asyncio as redis
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Gauge, Histogram
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from lab.common.db import init_schema, make_engine, wait_for_database
-from lab.common.http import install_http_middleware
+from lab.common.faults import FaultStore, install_fault_routes
+from lab.common.http import install_http_middleware, route_template
 from lab.common.log_setup import setup_logging
 from lab.common.settings import load_settings
 
 SERVICE = "shop-api"
 FULFILLMENT_QUEUE = "fulfillment"
+# Healthy queries take under 5 ms; the stats query without its index takes 50-100 ms
+# (measured). 50 ms separates the two with a 10x margin.
+SLOW_QUERY_SECONDS = 0.05
 
 settings = load_settings()
 setup_logging(SERVICE, settings.log_level)
@@ -60,9 +73,75 @@ ORDERS = Counter("orders_total", "Order attempts by outcome.", ["outcome"])
 QUEUE_PUBLISH_ERRORS = Counter("queue_publish_errors_total", "Failed fulfillment-job publishes.")
 
 
+# ---- Fault flags ------------------------------------------------------------------------
+
+
+class ConnectionLeak(BaseModel):
+    """Simulates a code path that checks out DB connections and never returns them."""
+
+    model_config = ConfigDict(extra="forbid")
+    count: int = Field(ge=1, le=20)
+    hold_seconds: float = Field(default=900, gt=0)
+
+
+class ShopFaults(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # A bad config value, as if PAYMENT_TIMEOUT had been changed and redeployed.
+    payment_timeout_s: float | None = Field(default=None, gt=0)
+    # A buggy release: orders for these products hit code that reads a missing field.
+    release_bug_product_ids: list[int] = []
+    db_connection_leak: ConnectionLeak | None = None
+    # Loud but harmless warnings on every request: a red herring.
+    decoy_warnings: bool = False
+
+
+faults = FaultStore(ShopFaults)
+
+
+async def hold_connection(engine, hold_seconds: float) -> None:
+    while True:
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+                await asyncio.sleep(hold_seconds)
+            return
+        except PoolTimeoutError:
+            continue  # traffic holds the connection right now; keep trying to grab one
+
+
+async def on_faults_change(old: ShopFaults, new: ShopFaults) -> None:
+    if old.db_connection_leak == new.db_connection_leak:
+        return
+    for task in app.state.leak_tasks:
+        task.cancel()
+    app.state.leak_tasks = []
+    if new.db_connection_leak is not None:
+        leak = new.db_connection_leak
+        app.state.leak_tasks = [
+            asyncio.create_task(hold_connection(app.state.engine, leak.hold_seconds))
+            for _ in range(leak.count)
+        ]
+
+
+def effective_payment_timeout() -> float:
+    return faults.current.payment_timeout_s or settings.payment_timeout
+
+
+# ---- App --------------------------------------------------------------------------------
+
+
 class OrderIn(BaseModel):
     product_id: int = Field(gt=0)
     quantity: int = Field(gt=0, le=10)
+
+
+class ChangeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    service: str
+    kind: Literal["deploy", "config"]
+    summary: str
+    details: dict = {}
+    source: Literal["history", "scenario"] = "scenario"
 
 
 @asynccontextmanager
@@ -71,6 +150,7 @@ async def lifespan(app: FastAPI):
     await wait_for_database(engine)
     await init_schema(engine)
     app.state.engine = engine
+    app.state.leak_tasks = []
     app.state.redis = redis.from_url(
         settings.redis_url, socket_timeout=0.5, socket_connect_timeout=0.5
     )
@@ -82,13 +162,30 @@ async def lifespan(app: FastAPI):
     DB_POOL_CHECKED_OUT.set_function(pool.checkedout)
     log.info("shop-api started", extra={"fields": {"db_pool_size": settings.db_pool_size}})
     yield
+    for task in app.state.leak_tasks:
+        task.cancel()
     await app.state.payments.aclose()
     await app.state.redis.aclose()
     await engine.dispose()
 
 
 app = FastAPI(title="Lab shop API", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def decoy_warnings(request: Request, call_next):
+    response = await call_next(request)
+    route = route_template(request)
+    if faults.current.decoy_warnings and not route.startswith("/_") and route != "/metrics":
+        log.warning(
+            "client sent deprecated header X-Client-Version, support ends 2027-01",
+            extra={"fields": {"route": route}},
+        )
+    return response
+
+
 install_http_middleware(app)
+install_fault_routes(app, faults, on_faults_change)
 
 
 @app.exception_handler(PoolTimeoutError)
@@ -98,7 +195,7 @@ async def pool_timeout_handler(request: Request, exc: PoolTimeoutError) -> JSONR
         "database connection pool exhausted",
         extra={
             "fields": {
-                "route": request.url.path,
+                "route": route_template(request),
                 "pool_size": settings.db_pool_size,
                 "pool_timeout_s": settings.db_pool_timeout,
             }
@@ -114,7 +211,7 @@ async def run_query(request: Request, name: str, sql: str, params: dict | None =
         rows = [dict(r._mapping) for r in result]
     elapsed = time.perf_counter() - start
     DB_QUERY_DURATION.labels(name).observe(elapsed)
-    if elapsed > 0.5:
+    if elapsed > SLOW_QUERY_SECONDS:
         log.warning(
             "slow database query",
             extra={"fields": {"query": name, "duration_ms": round(elapsed * 1000, 1)}},
@@ -180,17 +277,34 @@ async def read_product(request: Request, product_id: int):
     return await get_product(request, product_id)
 
 
+@app.get("/products/{product_id}/stats")
+async def product_stats(request: Request, product_id: int):
+    """Orders and revenue for one product over the last 24 hours."""
+    await get_product(request, product_id)
+    rows = await run_query(
+        request,
+        "product_stats",
+        "SELECT count(*) AS orders_24h, coalesce(sum(amount_cents), 0) AS revenue_cents_24h "
+        "FROM orders WHERE product_id = :id AND created_at > now() - interval '24 hours'",
+        {"id": product_id},
+    )
+    return {"product_id": product_id, **rows[0]}
+
+
 async def charge(request: Request, amount_cents: int, product_id: int) -> str:
+    timeout = effective_payment_timeout()
     start = time.perf_counter()
     try:
         resp = await request.app.state.payments.post(
-            "/charge", json={"amount_cents": amount_cents, "reference": f"product-{product_id}"}
+            "/charge",
+            json={"amount_cents": amount_cents, "reference": f"product-{product_id}"},
+            timeout=timeout,
         )
     except httpx.TimeoutException:
         PAYMENT_REQUESTS.labels("timeout").inc()
         log.error(
             "payment provider timed out",
-            extra={"fields": {"timeout_s": settings.payment_timeout, "amount_cents": amount_cents}},
+            extra={"fields": {"timeout_s": timeout, "amount_cents": amount_cents}},
         )
         raise HTTPException(504, "payment provider timed out") from None
     except httpx.HTTPError as exc:
@@ -221,10 +335,18 @@ async def refund(request: Request, charge_id: str) -> None:
         )
 
 
+def order_amount(product: dict, quantity: int) -> int:
+    if product["id"] in faults.current.release_bug_product_ids:
+        # The "buggy release": code that assumes every product has a discount field.
+        # Raises KeyError, which surfaces as an unhandled 500 with a traceback in the logs.
+        return (product["price_cents"] - product["discount_cents"]) * quantity
+    return product["price_cents"] * quantity
+
+
 @app.post("/orders", status_code=201)
 async def create_order(request: Request, order: OrderIn):
     product = await get_product(request, order.product_id)
-    amount = product["price_cents"] * order.quantity
+    amount = order_amount(product, order.quantity)
 
     # Charge before touching the database, so no DB connection is held while waiting on an
     # external service. If the stock check then fails, the charge is refunded.
@@ -312,3 +434,35 @@ async def health(request: Request):
         {"status": "ok" if healthy else "degraded", "checks": checks},
         status_code=200 if healthy else 503,
     )
+
+
+# ---- Change log (control plane: the lab's stand-in for a deploy tool) --------------------
+
+
+@app.post("/_changes", status_code=201, include_in_schema=False)
+async def record_change(request: Request, change: ChangeIn):
+    async with request.app.state.engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "INSERT INTO changes (service, kind, summary, details, source) "
+                    "VALUES (:service, :kind, :summary, CAST(:details AS jsonb), :source) "
+                    "RETURNING id, ts"
+                ),
+                {**change.model_dump(), "details": json.dumps(change.details)},
+            )
+        ).one()
+    return {"id": row.id, "ts": row.ts}
+
+
+@app.get("/_changes", include_in_schema=False)
+async def list_changes(request: Request, since_minutes: int = Query(1440, ge=1, le=43200)):
+    async with request.app.state.engine.connect() as conn:
+        result = await conn.execute(
+            text(
+                "SELECT id, ts, service, kind, summary, details FROM changes "
+                "WHERE ts > now() - make_interval(mins => :m) ORDER BY ts DESC"
+            ),
+            {"m": since_minutes},
+        )
+        return [dict(r._mapping) for r in result]

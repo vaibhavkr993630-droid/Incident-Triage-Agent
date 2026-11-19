@@ -22,7 +22,7 @@ services:
       - --web.enable-lifecycle
     volumes:
       - ./telemetry/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    ports: ["9090:9090"]
+    ports: ["127.0.0.1:9090:9090"]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
       interval: 3s
@@ -38,7 +38,7 @@ services:
     command: ["-config.file=/etc/loki/loki.yml"]
     volumes:
       - ./telemetry/loki.yml:/etc/loki/loki.yml:ro
-    ports: ["3100:3100"]
+    ports: ["127.0.0.1:3100:3100"]
     healthcheck:
       test: ["CMD", "/busybox/wget", "-qO-", "http://localhost:3100/ready"]
       interval: 3s
@@ -64,7 +64,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256m
+          memory: 384m
 
   redis:
     image: redis:7-alpine
@@ -84,7 +84,7 @@ services:
     image: incident-lab:local
     command: ["uvicorn", "lab.payment_provider.app:app", "--host", "0.0.0.0", "--port", "8001"]
     environment: *lab-env
-    ports: ["8001:8001"]
+    ports: ["127.0.0.1:8001:8001"]
     depends_on:
       loki: { condition: service_healthy }
     healthcheck:
@@ -102,7 +102,7 @@ services:
     image: incident-lab:local
     command: ["uvicorn", "lab.shop_api.app:app", "--host", "0.0.0.0", "--port", "8000"]
     environment: *lab-env
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -113,6 +113,8 @@ services:
       interval: 3s
       timeout: 3s
       retries: 30
+      # The first start seeds 2M historical orders (about 20 s on a laptop).
+      start_period: 180s
     deploy:
       resources:
         limits:
@@ -121,11 +123,16 @@ services:
   worker:
     build: *lab-build
     image: incident-lab:local
-    command: ["python", "-m", "lab.worker.main"]
+    command: ["uvicorn", "lab.worker.main:app", "--host", "0.0.0.0", "--port", "9100"]
     environment: *lab-env
-    ports: ["9100:9100"]
+    ports: ["127.0.0.1:9100:9100"]
     depends_on:
       shop-api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9100/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
     deploy:
       resources:
         limits:

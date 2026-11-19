@@ -58,6 +58,13 @@ def setup_logging(service: str, level: str = "INFO") -> None:
     root = logging.getLogger()
     root.handlers[:] = handlers
     root.setLevel(level)
+    # Uvicorn installs its own plain-text stderr handlers before importing the app. Route its
+    # loggers through ours instead, or unhandled-exception tracebacks ("Exception in ASGI
+    # application") would bypass the JSON format and never reach Loki.
+    for name in ("uvicorn", "uvicorn.error"):
+        uv_logger = logging.getLogger(name)
+        uv_logger.handlers.clear()
+        uv_logger.propagate = True
     # Our middleware logs each request with more detail than uvicorn's access log.
     logging.getLogger("uvicorn.access").disabled = True
     # httpx logs every request at INFO; that is noise for the agent.

@@ -1,0 +1,35 @@
+id: redis_down
+title: Redis (cache and job queue) is down
+alert: shop-api /health has been returning 503 (degraded) for the last 2 minutes.
+ground_truth:
+  category: cache_unavailable
+  component: redis
+  key_evidence:
+    - shop-api logs "cache read failed, falling back to database" with connection or timeout errors
+    - /health reports redis failing while postgres is ok
+    - the worker logs "cannot read fulfillment queue"; new orders are not enqueued for fulfillment
+inject:
+  - type: compose
+    action: stop
+    service: redis
+recover:
+  - type: compose
+    action: start
+    service: redis
+settle_seconds: 20
+signals:
+  - description: cache lookups fail
+    source: prometheus
+    query: 'sum(rate(cache_requests_total{job="shop-api",result="error"}[30s]))'
+    op: ">"
+    value: 0.5
+  - description: shop-api logs cache read failures
+    source: loki
+    query: 'sum(count_over_time({service="shop-api"} |= "cache read failed" [30s]))'
+    op: ">="
+    value: 10
+  - description: the worker cannot reach the queue
+    source: prometheus
+    query: 'sum(rate(worker_redis_errors_total{job="worker"}[30s]))'
+    op: ">"
+    value: 0.1

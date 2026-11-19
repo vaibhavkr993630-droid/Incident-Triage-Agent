@@ -61,3 +61,36 @@ jobs:
       - name: Stop the lab stack
         if: always()
         run: docker compose down -v
+
+  fault-scenarios:
+    runs-on: ubuntu-latest
+    needs: checks
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Start the lab stack
+        run: docker compose up -d --build --wait
+
+      - name: Let the load generator run (the baseline check needs traffic)
+        run: sleep 30
+
+      - name: Inject every fault, check it is visible, recover
+        run: uv run pytest -m scenario -v -s
+
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose logs --tail 100
+
+      - name: Stop the lab stack
+        if: always()
+        run: docker compose down -v

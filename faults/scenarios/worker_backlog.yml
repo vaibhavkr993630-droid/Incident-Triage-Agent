@@ -1,0 +1,40 @@
+id: worker_backlog
+title: Fulfillment jobs become slow and the queue backs up
+alert: >-
+  Orders are not being fulfilled on time: many orders have stayed in 'paid' status for
+  several minutes.
+ground_truth:
+  category: worker_backlog
+  component: worker
+  key_evidence:
+    - worker_queue_depth keeps growing
+    - the worker logs "fulfillment job slow" (jobs take about 8 s instead of milliseconds)
+    - orders are still created at the normal rate, so the backlog is on the processing side
+inject:
+  - type: http
+    service: worker
+    method: PUT
+    path: /_faults
+    json: {job_delay_s: 8}
+recover:
+  - type: http
+    service: worker
+    method: DELETE
+    path: /_faults
+settle_seconds: 40
+signals:
+  - description: the queue is backing up
+    source: prometheus
+    query: 'max(worker_queue_depth{job="worker"})'
+    op: ">"
+    value: 15
+  - description: the worker logs slow jobs
+    source: loki
+    query: 'sum(count_over_time({service="worker"} |= "fulfillment job slow" [60s]))'
+    op: ">="
+    value: 1
+  - description: fulfillment throughput collapsed
+    source: prometheus
+    query: 'sum(rate(worker_jobs_total{job="worker",outcome="fulfilled"}[30s]))'
+    op: "<"
+    value: 0.5

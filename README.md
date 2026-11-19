@@ -40,10 +40,10 @@ docker compose up -d --build --wait
 
 | Service | Role | Port |
 |---|---|---|
-| `shop-api` | FastAPI shop: products (cached in Redis), orders (charged through the payment provider, written to Postgres, queued for fulfillment) | 8000 |
+| `shop-api` | FastAPI shop: products (cached in Redis), 24-hour product stats over 2M rows of order history, orders (charged through the payment provider, written to Postgres, queued for fulfillment), and a change log of deploys and config changes | 8000 |
 | `payment-provider` | Mock third-party payment API | 8001 |
 | `worker` | Takes fulfillment jobs off the Redis queue and marks orders fulfilled; restocks inventory | 9100 (metrics) |
-| `loadgen` | Steady traffic, about 5 requests/second (mostly reads, some orders) | - |
+| `loadgen` | Steady traffic, about 5 requests/second (product pages, product list, product stats, orders) | - |
 | `postgres`, `redis` | Database and cache/queue | internal |
 | `prometheus`, `loki` | Metrics and logs (see [Telemetry](#telemetry)) | 9090, 3100 |
 
@@ -73,7 +73,46 @@ on a laptop and behaves the same in CI. The handler never blocks or raises: if L
 requests are unaffected, and lost lines are counted in `log_shipping_dropped_total`. A
 production setup would usually run a collector such as Grafana Alloy instead.
 
-The whole stack, telemetry included, uses about 475 MB of RAM.
+The whole stack, telemetry included, uses about 500 MB of RAM. Published ports bind to
+`127.0.0.1` only, because the lab's control routes are unauthenticated.
+
+## Fault injection
+
+Every fault is a scenario file in [`faults/scenarios/`](faults/scenarios/). A scenario says how
+to break the lab, how to undo it, what the true cause is, what the on-call engineer is told
+(the alert), and which signals in Prometheus and Loki prove the fault is really observable.
+
+| Scenario | True cause (category, component) | How it is injected |
+|---|---|---|
+| `missing_index` | `db_slow_query`, postgres | Drop the index the product-stats query relies on (2M rows of order history) |
+| `connection_leak` | `db_pool_exhausted`, shop-api | A code path checks out every pooled connection and never returns them |
+| `redis_down` | `cache_unavailable`, redis | Stop the Redis container |
+| `bad_payment_timeout_config` | `bad_config_change`, shop-api | Config change sets the payment timeout to 30 ms, recorded in the change log |
+| `payment_slow` | `dependency_slow`, payment-provider | Provider adds 3 s of latency; checkout calls hit the 2 s timeout |
+| `payment_errors` | `dependency_errors`, payment-provider | Provider fails 80% of charges with HTTP 500 |
+| `worker_backlog` | `worker_backlog`, worker | Each fulfillment job takes 8 s; the queue backs up |
+| `bad_release` | `bad_release`, shop-api | A recorded release breaks checkout for two products (`KeyError` traceback) |
+| `payment_slow_with_decoy` | `dependency_slow`, payment-provider | Slow provider hidden behind loud, unrelated warnings and an unrelated recent change |
+| `no_fault` | `no_fault`, none | Nothing; a vague complaint with healthy telemetry (tests false alarms) |
+
+Five of these scenarios raise the same alert, "Checkout errors: more than 5% of POST /orders
+requests have failed with 5xx". The alert alone cannot tell them apart; only investigation can.
+Alerts describe symptoms and never name the cause, which a unit test enforces.
+
+Each service has a small, typed set of fault flags behind internal `/_faults` routes. These
+control-plane routes are never logged or counted in metrics, so the injection itself leaves no
+trace for the agent to read. A live test checks this after running every scenario.
+
+```bash
+uv run python -m faults list                 # scenarios and their true causes
+uv run python -m faults run missing_index    # inject, verify signals, recover
+uv run python -m faults run --all
+uv run python -m faults baseline             # is the lab healthy right now?
+uv run python -m faults recover-all          # undo everything after an interrupted run
+```
+
+`run` waits for a healthy baseline, injects, waits for the fault to show up, checks every
+signal, then always recovers and confirms the baseline again.
 
 ## Development
 
@@ -85,6 +124,7 @@ uv run ruff check .
 uv run ruff format --check .
 uv run pytest                    # unit tests
 uv run pytest -m integration     # against the running lab stack
+uv run pytest -m scenario        # inject every fault into the running lab (about 10 minutes)
 ```
 
 ## License

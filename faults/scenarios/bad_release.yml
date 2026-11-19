@@ -1,0 +1,44 @@
+id: bad_release
+title: A shop-api release breaks checkout for some products
+alert: >-
+  Checkout errors: more than 5% of POST /orders requests have failed with 5xx over the last 2 minutes.
+ground_truth:
+  category: bad_release
+  component: shop-api
+  key_evidence:
+    - a shop-api deploy (v1.8.0, apply product discounts at checkout) shortly before the errors began
+    - shop-api logs unhandled KeyError 'discount_cents' tracebacks
+    - only orders for some products fail (ids 3 and 7); orders for other products succeed
+inject:
+  - type: http
+    service: shop-api
+    method: PUT
+    path: /_faults
+    json: {release_bug_product_ids: [3, 7]}
+  - type: http
+    service: shop-api
+    method: POST
+    path: /_changes
+    json:
+      service: shop-api
+      kind: deploy
+      summary: "Release shop-api v1.8.0: apply product discounts at checkout"
+      details: {version: "1.8.0", previous_version: "1.7.3"}
+recover:
+  - type: http
+    service: shop-api
+    method: DELETE
+    path: /_faults
+  - type: sql
+    statement: DELETE FROM changes WHERE source = 'scenario'
+signals:
+  - description: POST /orders returns 500
+    source: prometheus
+    query: 'sum(rate(http_requests_total{job="shop-api",route="/orders",status="500"}[30s]))'
+    op: ">"
+    value: 0.1
+  - description: shop-api logs the KeyError traceback
+    source: loki
+    query: 'sum(count_over_time({service="shop-api"} |= "discount_cents" [30s]))'
+    op: ">="
+    value: 2
