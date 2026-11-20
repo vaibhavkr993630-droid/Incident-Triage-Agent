@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -246,19 +247,43 @@ class Lab:
         self.sql("DELETE FROM changes WHERE source = 'scenario'")
 
 
+@dataclass(frozen=True)
+class FaultWindow:
+    """When the lab was last confirmed healthy, and when the fault went in.
+
+    Investigations of this scenario should not look earlier than ``healthy_since``
+    (``ToolContext.not_before``): anything older may be a previous scenario's leftovers.
+    """
+
+    healthy_since: datetime
+    injected_at: datetime
+
+
+# Healthy data recorded before each injection, so a "before vs after" comparison is possible.
+OBSERVE_BEFORE_SECONDS = 15
+
+
 @contextmanager
-def active_fault(lab: Lab, scenario: Scenario, baseline_timeout: float = 120) -> Iterator[None]:
+def active_fault(
+    lab: Lab,
+    scenario: Scenario,
+    baseline_timeout: float = 120,
+    observe_before: float = OBSERVE_BEFORE_SECONDS,
+) -> Iterator[FaultWindow]:
     problems = lab.wait_for_baseline(baseline_timeout)
     if problems:
         raise LabNotAtBaseline(f"lab not at baseline before {scenario.id}: {problems}")
+    healthy_since = datetime.now(UTC)
+    time.sleep(observe_before)
     lab.log(f"[{scenario.id}] " + ("injecting" if scenario.inject else "control: nothing injected"))
     try:
+        injected_at = datetime.now(UTC)
         for step in scenario.inject:
             lab.apply(step)
         if scenario.settle_seconds:
             lab.log(f"[{scenario.id}] settling for {scenario.settle_seconds}s")
             time.sleep(scenario.settle_seconds)
-        yield
+        yield FaultWindow(healthy_since, injected_at)
     finally:
         lab.log(f"[{scenario.id}] recovering")
         for step in scenario.recover:

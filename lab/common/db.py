@@ -176,16 +176,17 @@ async def init_schema(engine: AsyncEngine) -> None:
                 },
             )
 
-        changes = (await conn.execute(text("SELECT count(*) FROM changes"))).scalar_one()
-        if changes == 0:
-            for age, service, kind, summary in SEED_CHANGES:
-                await conn.execute(
-                    text(
-                        "INSERT INTO changes (ts, service, kind, summary) "
-                        "VALUES (now() - CAST(:age AS interval), :service, :kind, :summary)"
-                    ),
-                    {"age": age, "service": service, "kind": kind, "summary": summary},
-                )
+        # Re-dated on every start, so the benign history is always "a few hours/days ago"
+        # relative to now, however long ago the lab volume was created.
+        await conn.execute(text("DELETE FROM changes WHERE source = 'history'"))
+        for age, service, kind, summary in SEED_CHANGES:
+            await conn.execute(
+                text(
+                    "INSERT INTO changes (ts, service, kind, summary) "
+                    "VALUES (now() - CAST(:age AS interval), :service, :kind, :summary)"
+                ),
+                {"age": age, "service": service, "kind": kind, "summary": summary},
+            )
 
         # Indexes are built after the bulk load (faster than maintaining them row by row).
         await conn.execute(text("SET LOCAL session_replication_role = origin"))

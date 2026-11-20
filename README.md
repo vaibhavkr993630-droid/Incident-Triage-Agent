@@ -114,6 +114,46 @@ uv run python -m faults recover-all          # undo everything after an interrup
 `run` waits for a healthy baseline, injects, waits for the fault to show up, checks every
 signal, then always recovers and confirms the baseline again.
 
+## Agent tools
+
+The agent investigates only through five read-only tools (`triage/tools/`). The model chooses
+which tool to call and with what arguments; our code runs it.
+
+| Tool | Reads | Returns |
+|---|---|---|
+| `service_health` | each service's `/health` and Prometheus `up` | scrape status, HTTP status and body per service (shop-api's covers postgres and redis) |
+| `query_logs` | Loki, built from structured filters (service, level, text, minutes) | lines grouped by service, level and message: count, first/last seen, field summaries, exception tail |
+| `query_metrics` | Prometheus, PromQL written by the model | current values, or per-series summaries over a window: first, last, min, max, trend, 8 samples |
+| `list_metrics` | Prometheus metadata | metric names, types, help text and label names |
+| `list_recent_changes` | the deploy and config change log | changes newest first, with minutes since each |
+
+How the tool layer keeps an investigation safe and inside a small context window:
+
+- **Read-only by construction.** Tools only send GET requests to query APIs, health checks
+  and the change log. A test records every HTTP request the tools make and checks this.
+- **Summaries, not dumps.** One minute of the lab is about 600 log lines; `query_logs` turns
+  them into a handful of patterns. Every result is capped at 6,000 characters (about 1,500
+  tokens), dropping the least important items first and saying how many were dropped.
+- **Typed arguments.** Each tool has a pydantic argument model. Bad arguments, an unknown
+  tool, a PromQL syntax error or an unreachable backend all come back as a short error the
+  model can read and fix, never as an exception in the agent loop.
+- **Evidence ids.** Every call in an investigation gets an id (`t1`, `t2`, ...). The agent's
+  report will cite these ids, so each claim can be checked against what the tool returned.
+- **Untrusted text.** Log content is cut to a fixed length and stripped of control
+  characters before the model sees it.
+
+A test runs every fault scenario and checks, using only the tools' output, that the key
+evidence is visible: for example that `query_logs` shows timeouts logged with `timeout_s`
+0.03 in the bad-config case and 2.0 in the slow-provider case. This keeps the later evals
+fair: a wrong diagnosis must be the agent's fault, not a tool that hid the evidence.
+
+```bash
+uv run python -m triage.tools list
+uv run python -m triage.tools call service_health
+uv run python -m triage.tools call query_logs '{"level": "error", "minutes": 5}'
+uv run python -m triage.tools call query_metrics '{"query": "up", "minutes": 10}'
+```
+
 ## Development
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
@@ -124,7 +164,8 @@ uv run ruff check .
 uv run ruff format --check .
 uv run pytest                    # unit tests
 uv run pytest -m integration     # against the running lab stack
-uv run pytest -m scenario        # inject every fault into the running lab (about 10 minutes)
+uv run pytest -m scenario tests/faults   # inject every fault into the running lab (~8 min)
+uv run pytest -m scenario tests/triage   # check the agent's tools see every fault (~8 min)
 ```
 
 ## License
