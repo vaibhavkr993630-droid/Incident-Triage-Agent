@@ -240,6 +240,73 @@ uv run python -m faults recover payment_slow
 Every run is saved as a JSON trace in `runs/`: each model turn (latency, tokens, retries),
 each tool call with its full result, and the report.
 
+## Evaluation
+
+`evals/` runs every fault scenario against three variants on the same model and scores each
+run against the scenario's true cause:
+
+| Variant | What it is |
+|---|---|
+| `agent` | the full agent, six tools, runbook step in the prompt |
+| `agent_no_runbooks` | the same agent without `search_runbooks` and without the runbook step |
+| `baseline` | no investigation: a fixed 12-item telemetry snapshot (health, error and warning logs, changes, key metrics) in one prompt, one forced `submit_report` call |
+
+For each scenario the fault is injected once and every variant investigates the same live
+incident, in a shuffled order. Scoring is deterministic (no model grades the model):
+
+- **Correct**: category and component both match the ground truth.
+- **False alarms**: a cause named for the `no_fault` control.
+- **Quoted numbers**: every number in an evidence line is checked against the tool calls.
+  It is *grounded* if the cited call contains it (within rounding, allowing ms/s and
+  ratio/percent), *mis-cited* if only another call does, *unsupported* if none does.
+- Cost: tool calls, tokens, seconds. Provider or network errors are retried once, then
+  reported separately and left out of accuracy.
+
+### Results: `2026-11-21-v1`
+
+`gemini-3.5-flash-lite` (free tier), 10 scenarios, 1 repeat, 190 model requests. Raw rows,
+metadata and the summary are in [`evals/results/2026-11-21-v1/`](evals/results/2026-11-21-v1/).
+
+| Variant | Correct | False alarms | Quoted numbers: grounded / mis-cited / unsupported | Avg tool calls | Avg tokens | Avg seconds |
+|---|---|---|---|---|---|---|
+| `agent` | **10/10** | 0/1 | 44 / 3 / 0 | 8 | 31,471 | 18 |
+| `agent_no_runbooks` | **10/10** | 0/1 | 28 / 0 / 0 | 8 | 35,813 | 25 |
+| `baseline` | **9/10** | 0/1 | 27 / 1 / 0 | 12 (fixed) | 3,555 | 5 |
+
+What this shows, and what it does not:
+
+- **All three variants are near the ceiling.** With one repeat, 10/10 against 9/10 is a
+  single run, not evidence that the agent is better. These are clean single faults with
+  strong signals, and a well-chosen dashboard captures most of them.
+- **The baseline's miss is the instructive case.** On `connection_leak` it blamed postgres,
+  misled by shop-api's `/health` reporting a postgres error (a pool timeout). Both agent
+  variants followed up with pool metrics and blamed the connection pool in shop-api.
+  Following up on a misleading signal is what investigation adds.
+- **The baseline is about 9x cheaper in tokens and about 4x faster.** For incidents like
+  these, a strong fixed snapshot is a serious competitor.
+- **No invented numbers** in any run. The four mis-citations mostly combine two facts in one
+  finding (for example a latency from one call compared with a timeout from the change log)
+  while citing only one of the calls.
+- **Runbooks made no measurable difference** here: accuracy is at the ceiling, and the token
+  and time differences are within single-run noise.
+- **Confidence is about 1.0 on every run**, so calibration cannot be measured yet.
+
+The first version of the number check reported 78% grounded for the agent. Inspecting the
+failures showed most were scorer bugs (numbers glued to units such as `0.09s` were misread,
+clock times were counted as numbers, and query windows in tool arguments were not treated as
+a source); the fixed scorer was re-applied to the saved traces with
+`python -m evals rescore`, without new model calls.
+
+Next steps to separate the variants: harder scenarios (two simultaneous faults, slower
+degradations, a misleading recent change), at least three repeats per scenario, and an
+agent that stops earlier on easy incidents to close the cost gap.
+
+```bash
+uv run python -m evals run --id <name> --repeats 1           # needs the lab and a model key
+uv run python -m evals run --id <name> --scenarios payment_slow no_fault --variants agent baseline
+uv run python -m evals rescore evals/results/<name>/results.jsonl
+```
+
 ## Development
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).

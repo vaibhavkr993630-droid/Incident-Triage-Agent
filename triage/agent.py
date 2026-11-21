@@ -138,7 +138,12 @@ class TriageAgent:
         session = ToolSession(self.registry, max_calls=self.limits.max_tool_calls)
         tools = self.registry.schemas() + [submit_tool_schema()]
         messages: list[dict] = [
-            {"role": "system", "content": prompts.system_prompt(self.limits.max_tool_calls)},
+            {
+                "role": "system",
+                "content": prompts.system_prompt(
+                    self.limits.max_tool_calls, runbooks="search_runbooks" in self.registry.tools
+                ),
+            },
             {
                 "role": "user",
                 "content": prompts.alert_message(

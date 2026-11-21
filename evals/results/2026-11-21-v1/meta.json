@@ -1,0 +1,32 @@
+{
+  "eval_id": "2026-11-21-v1",
+  "started_at": "2026-11-21T18:52:49+00:00",
+  "commit": "01a18ff+uncommitted",
+  "scenarios": [
+    "bad_payment_timeout_config",
+    "bad_release",
+    "connection_leak",
+    "missing_index",
+    "no_fault",
+    "payment_errors",
+    "payment_slow",
+    "payment_slow_with_decoy",
+    "redis_down",
+    "worker_backlog"
+  ],
+  "variants": [
+    "agent",
+    "agent_no_runbooks",
+    "baseline"
+  ],
+  "repeats": 1,
+  "seed": 7,
+  "primary_model": "gemini-3.5-flash-lite",
+  "limits": {
+    "max_turns": 15,
+    "max_tool_calls": 20,
+    "max_seconds": 300,
+    "max_tokens": 250000
+  },
+  "fallback_model": "gemini-3.1-flash-lite"
+}
