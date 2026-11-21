@@ -3,6 +3,8 @@
 uv run python -m faults list                 scenarios and their true categories
 uv run python -m faults run <id> [<id> ...]  inject, verify signals, recover
 uv run python -m faults run --all
+uv run python -m faults inject <id>          inject and LEAVE it active (for a manual triage)
+uv run python -m faults recover <id>         undo that scenario and wait for baseline
 uv run python -m faults baseline             is the lab healthy right now?
 uv run python -m faults recover-all          undo every fault (after a crashed run)
 """
@@ -11,7 +13,7 @@ import argparse
 import sys
 
 from faults.models import load_scenarios
-from faults.runner import Lab, run_scenario
+from faults.runner import Lab, inject, recover, run_scenario
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,6 +23,8 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run")
     run.add_argument("ids", nargs="*")
     run.add_argument("--all", action="store_true")
+    for name in ("inject", "recover"):
+        sub.add_parser(name).add_argument("id")
     sub.add_parser("baseline")
     sub.add_parser("recover-all")
     args = parser.parse_args(argv)
@@ -32,6 +36,21 @@ def main(argv: list[str] | None = None) -> int:
         for s in scenarios.values():
             gt = s.ground_truth
             print(f"{s.id:<28} {gt.category:<20} {gt.component:<17} {s.title}")
+        return 0
+
+    if args.command in ("inject", "recover"):
+        if args.id not in scenarios:
+            parser.error(f"unknown scenario id: {args.id}")
+        scenario = scenarios[args.id]
+        if args.command == "recover":
+            recover(lab, scenario)
+            problems = lab.wait_for_baseline()
+            print("at baseline" if not problems else f"NOT at baseline: {problems}")
+            return 0 if not problems else 1
+        window = inject(lab, scenario)
+        print(f"\nActive. Alert for the on-call engineer:\n  {scenario.alert}")
+        print(f"Investigate with:  --not-before {window.healthy_since.isoformat()}")
+        print(f"Undo with:         uv run python -m faults recover {scenario.id}")
         return 0
 
     if args.command == "baseline":

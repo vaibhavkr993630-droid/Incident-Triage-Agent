@@ -20,3 +20,6 @@ evals/runs/
 .vscode/
 .idea/
 .DS_Store
+
+# Saved agent runs (traces)
+runs/

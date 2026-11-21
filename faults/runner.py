@@ -263,31 +263,45 @@ class FaultWindow:
 OBSERVE_BEFORE_SECONDS = 15
 
 
-@contextmanager
-def active_fault(
+def inject(
     lab: Lab,
     scenario: Scenario,
     baseline_timeout: float = 120,
     observe_before: float = OBSERVE_BEFORE_SECONDS,
-) -> Iterator[FaultWindow]:
+) -> FaultWindow:
+    """Wait for baseline, record healthy data for a moment, inject, let the fault settle."""
     problems = lab.wait_for_baseline(baseline_timeout)
     if problems:
         raise LabNotAtBaseline(f"lab not at baseline before {scenario.id}: {problems}")
     healthy_since = datetime.now(UTC)
     time.sleep(observe_before)
     lab.log(f"[{scenario.id}] " + ("injecting" if scenario.inject else "control: nothing injected"))
+    injected_at = datetime.now(UTC)
     try:
-        injected_at = datetime.now(UTC)
         for step in scenario.inject:
             lab.apply(step)
-        if scenario.settle_seconds:
-            lab.log(f"[{scenario.id}] settling for {scenario.settle_seconds}s")
-            time.sleep(scenario.settle_seconds)
-        yield FaultWindow(healthy_since, injected_at)
+    except Exception:
+        recover(lab, scenario)  # never leave a half-injected fault behind
+        raise
+    if scenario.settle_seconds:
+        lab.log(f"[{scenario.id}] settling for {scenario.settle_seconds}s")
+        time.sleep(scenario.settle_seconds)
+    return FaultWindow(healthy_since, injected_at)
+
+
+def recover(lab: Lab, scenario: Scenario) -> None:
+    lab.log(f"[{scenario.id}] recovering")
+    for step in scenario.recover:
+        lab.apply(step)
+
+
+@contextmanager
+def active_fault(lab: Lab, scenario: Scenario, **kwargs) -> Iterator[FaultWindow]:
+    window = inject(lab, scenario, **kwargs)
+    try:
+        yield window
     finally:
-        lab.log(f"[{scenario.id}] recovering")
-        for step in scenario.recover:
-            lab.apply(step)
+        recover(lab, scenario)
 
 
 def run_scenario(lab: Lab, scenario: Scenario) -> ScenarioRun:

@@ -94,18 +94,32 @@ class Tool:
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": _clean_schema(self.Args.model_json_schema()),
+                "parameters": parameters_schema(self.Args),
             },
         }
 
 
-def _clean_schema(node: Any) -> Any:
-    """Drop pydantic's 'title' keys: noise for the model, and some providers reject them."""
-    if isinstance(node, dict):
-        return {k: _clean_schema(v) for k, v in node.items() if k != "title"}
-    if isinstance(node, list):
-        return [_clean_schema(v) for v in node]
-    return node
+def parameters_schema(model: type[BaseModel]) -> dict:
+    """A pydantic model as a function-calling parameter schema.
+
+    Drops pydantic's "title" keys (noise for the model) and inlines "$ref" definitions,
+    which several providers' function-calling schemas do not support.
+    """
+    schema = model.model_json_schema()
+    defs = schema.get("$defs", {})
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            if "$ref" in node:
+                target = defs[node["$ref"].split("/")[-1]]
+                rest = {k: v for k, v in node.items() if k != "$ref"}
+                return walk({**target, **rest})
+            return {k: walk(v) for k, v in node.items() if k not in ("title", "$defs")}
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        return node
+
+    return walk(schema)
 
 
 @dataclass(frozen=True)

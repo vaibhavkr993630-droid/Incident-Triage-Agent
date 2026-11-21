@@ -154,6 +154,68 @@ uv run python -m triage.tools call query_logs '{"level": "error", "minutes": 5}'
 uv run python -m triage.tools call query_metrics '{"query": "up", "minutes": 10}'
 ```
 
+## The triage agent
+
+`triage/agent.py` is a plain tool-calling loop, written without an agent framework so every
+step is visible and testable:
+
+```
+system prompt (the system, a method, the rules) + the alert
+  -> model replies with tool calls      -> our code runs each one, returns "[t3] <result>"
+  -> model calls submit_report          -> validated; errors go back to the model to fix
+  -> model replies in prose             -> reminded to call a tool or submit
+  -> a budget runs out                  -> the next turn must call submit_report
+  -> still no valid report              -> an honest "inconclusive" placeholder, never a guess
+```
+
+The report is a typed schema (`triage/report.py`): root-cause category and component,
+a summary, evidence items that each cite a tool-call id, the hypotheses ruled out, a
+confidence, and a suggested next step for a human (the agent never acts). A report is
+rejected if it cites a tool call that does not exist or that returned an error.
+
+| Limit | Default |
+|---|---|
+| Model turns | 15 |
+| Tool calls | 20 |
+| Tokens | 250,000 |
+| Wall-clock time | 300 s |
+
+**Models.** The client (`triage/llm.py`) speaks the OpenAI-compatible chat API, which
+Gemini, Groq and Ollama all offer, so the provider is a setting. Rate limits (429), server
+errors and timeouts are retried with backoff (honouring `Retry-After`) and then fall back to
+a second provider; a bad key or unknown model fails at once. A used-up daily quota (Google
+sends the wait in the response body, e.g. 17 hours) skips straight to the fallback instead of
+retrying. Provider-specific fields on tool calls are sent back unchanged: Gemini 3 models
+attach a "thought signature" to every tool call and reject the next request without it.
+
+Defaults use free tiers. Measured on a free Google AI Studio key: `gemini-3.5-flash-lite`
+answered tool calls in about 1.5 s, while `gemini-3.5-flash` took 54 s and allows only 20
+requests per day. So the primary is `gemini-3.5-flash-lite`, and the fallback is
+`gemini-3.1-flash-lite` (a separate daily quota on the same key), or Groq if its key is set.
+
+First real runs (single runs, not an evaluation; the scored evaluation comes later):
+
+| Scenario | Agent's answer | Turns / tool calls / tokens / time |
+|---|---|---|
+| `payment_slow` | `dependency_slow` @ payment-provider (correct) | 8 / 6 / 26k / 36 s |
+| `bad_payment_timeout_config` | `bad_config_change` @ shop-api (correct) | 3 / 4 / 9k / 8 s |
+| `payment_slow_with_decoy` | `dependency_slow` @ payment-provider (correct; ruled out the decoy change) | 8 / 7 / 27k / 22 s |
+| `no_fault` | `no_fault` (correct) | 12 / 11 / 46k / 22 s |
+
+```bash
+# .env in the repo root (git-ignored)
+GEMINI_API_KEY=...
+GROQ_API_KEY=...            # optional fallback
+
+uv run python -m triage models                       # models your key can use
+uv run python -m faults inject payment_slow          # break the lab, leave it broken
+uv run python -m triage investigate "Checkout errors: ..." --not-before <time printed above>
+uv run python -m faults recover payment_slow
+```
+
+Every run is saved as a JSON trace in `runs/`: each model turn (latency, tokens, retries),
+each tool call with its full result, and the report.
+
 ## Development
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
