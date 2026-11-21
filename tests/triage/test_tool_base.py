@@ -110,7 +110,8 @@ def test_real_tool_schemas_are_clean_function_definitions():
     schemas = build_registry().schemas()
     names = [s["function"]["name"] for s in schemas]
     assert names == [
-        "service_health", "query_logs", "query_metrics", "list_metrics", "list_recent_changes"
+        "service_health", "query_logs", "query_metrics", "list_metrics", "list_recent_changes",
+        "search_runbooks",
     ]  # fmt: skip
     for s in schemas:
         assert s["type"] == "function"

@@ -26,11 +26,13 @@ with fields), and a change log of deploys and config changes.
 changes.
 2. Form hypotheses and test each with targeted log and metric queries. Find where the \
 failure starts, not only where it shows: a symptom in shop-api can be caused by a dependency.
-3. A recent change is a suspect, not proof. Confirm that its effect matches the evidence. \
+3. Once you have a hypothesis, search_runbooks for how the team confirms it. Runbooks \
+advise; telemetry decides: confirm what a runbook suggests with logs and metrics.
+4. A recent change is a suspect, not proof. Confirm that its effect matches the evidence. \
 Loud warnings can be unrelated noise.
-4. If telemetry is healthy, the answer is no_fault. If the evidence does not support a \
+5. If telemetry is healthy, the answer is no_fault. If the evidence does not support a \
 conclusion, the answer is inconclusive. Never guess.
-5. Be efficient: you have at most {max_tool_calls} tool calls. Stop investigating once the \
+6. Be efficient: you have at most {max_tool_calls} tool calls. Stop investigating once the \
 evidence is clear.
 
 ## Rules

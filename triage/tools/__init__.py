@@ -5,8 +5,16 @@ from triage.tools.changes import ListRecentChanges
 from triage.tools.health import ServiceHealth
 from triage.tools.logs import QueryLogs
 from triage.tools.metrics import ListMetrics, QueryMetrics
+from triage.tools.runbooks import SearchRunbooks
 
-TOOL_CLASSES = [ServiceHealth, QueryLogs, QueryMetrics, ListMetrics, ListRecentChanges]
+TOOL_CLASSES = [
+    ServiceHealth,
+    QueryLogs,
+    QueryMetrics,
+    ListMetrics,
+    ListRecentChanges,
+    SearchRunbooks,
+]
 
 
 def build_registry(ctx: ToolContext | None = None) -> ToolRegistry:

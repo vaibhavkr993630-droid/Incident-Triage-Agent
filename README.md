@@ -116,7 +116,7 @@ signal, then always recovers and confirms the baseline again.
 
 ## Agent tools
 
-The agent investigates only through five read-only tools (`triage/tools/`). The model chooses
+The agent investigates only through six read-only tools (`triage/tools/`). The model chooses
 which tool to call and with what arguments; our code runs it.
 
 | Tool | Reads | Returns |
@@ -126,6 +126,7 @@ which tool to call and with what arguments; our code runs it.
 | `query_metrics` | Prometheus, PromQL written by the model | current values, or per-series summaries over a window: first, last, min, max, trend, 8 samples |
 | `list_metrics` | Prometheus metadata | metric names, types, help text and label names |
 | `list_recent_changes` | the deploy and config change log | changes newest first, with minutes since each |
+| `search_runbooks` | the team's runbooks in [`runbooks/`](runbooks/) | the best-matching section of each of the top runbooks |
 
 How the tool layer keeps an investigation safe and inside a small context window:
 
@@ -153,6 +154,26 @@ uv run python -m triage.tools call service_health
 uv run python -m triage.tools call query_logs '{"level": "error", "minutes": 5}'
 uv run python -m triage.tools call query_metrics '{"query": "up", "minutes": 10}'
 ```
+
+## Runbooks
+
+[`runbooks/`](runbooks/) holds twelve short runbooks written like a team's playbook: when to
+use them, how to confirm the problem, common causes, and mitigation. Nine cover the kinds of
+failure the lab can have; three (disk space, TLS certificates, memory pressure) cover
+problems it never has, so retrieval has to pick the right one. They describe symptoms and
+checks in general terms and never name the fault scenarios.
+
+`search_runbooks` ranks runbook sections with BM25, written by hand with no dependencies.
+Each `## ` section is one chunk, and each chunk carries its runbook's title, so a section
+such as "How to confirm" stays findable. BM25 rather than embeddings, on purpose: the corpus
+is a dozen documents, and queries are full of exact technical terms (`db_pool_checked_out`,
+`timeout_s`, `KeyError`) where lexical matching is strongest; it also needs no model and no
+API quota. Hybrid search (BM25 plus embeddings) would be the step for a large corpus.
+
+Retrieval quality is measured on 18 labelled queries phrased the way the agent asks:
+recall@1 = 1.00 and recall@3 = 1.00. The same author wrote the queries and the runbooks, so
+this mainly guards against regressions; it is not an independent benchmark. The agent's
+prompt states the rule that matters: runbooks advise, telemetry decides.
 
 ## The triage agent
 
@@ -201,6 +222,9 @@ First real runs (single runs, not an evaluation; the scored evaluation comes lat
 | `bad_payment_timeout_config` | `bad_config_change` @ shop-api (correct) | 3 / 4 / 9k / 8 s |
 | `payment_slow_with_decoy` | `dependency_slow` @ payment-provider (correct; ruled out the decoy change) | 8 / 7 / 27k / 22 s |
 | `no_fault` | `no_fault` (correct) | 12 / 11 / 46k / 22 s |
+| `missing_index` (with runbooks) | `db_slow_query` @ postgres (correct) | 11 / 10 / 46k / 20 s |
+| `connection_leak` (with runbooks) | `db_pool_exhausted` @ shop-api (correct; did not blame postgres despite /health) | 6 / 9 / 26k / 23 s |
+| `worker_backlog` (with runbooks) | `worker_backlog` @ worker (correct) | 7 / 12 / 30k / 46 s |
 
 ```bash
 # .env in the repo root (git-ignored)
