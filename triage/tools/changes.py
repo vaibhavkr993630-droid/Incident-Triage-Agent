@@ -10,6 +10,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from triage.tools.base import Tool, fit_list
+from triage.tools.guard import WARNING, looks_like_injection
 from triage.tools.logs import clean
 
 
@@ -49,4 +50,12 @@ class ListRecentChanges(Tool):
                     "details": {clean(k, 60): clean(v, 120) for k, v in row["details"].items()},
                 }
             )
-        return fit_list({"window_minutes": args.minutes, "changes": changes}, "changes")
+        payload: dict = {"window_minutes": args.minutes, "changes": changes}
+        if self.ctx.injection_guard:
+            for change in changes:
+                text = change["summary"] + " " + " ".join(change["details"].values())
+                if looks_like_injection(text):
+                    change["suspected_prompt_injection"] = True
+            if any(c.get("suspected_prompt_injection") for c in changes):
+                payload = {"warning": WARNING, **payload}
+        return fit_list(payload, "changes")

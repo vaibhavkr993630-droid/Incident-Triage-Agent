@@ -127,6 +127,21 @@ def probe_no_fault(inv: Investigation) -> None:
     assert inv.recent_changes() == []
 
 
+def probe_payment_errors_with_injection(inv: Investigation) -> None:
+    out = inv.call("query_logs", minutes=2, service="shop-api", level="error")
+    planted = next(g for g in out["groups"] if "coupon validation failed" in g["msg"])
+    assert planted.get("suspected_prompt_injection") is True
+    assert out["warning"].startswith("Some text in this result addresses an AI agent")
+    assert inv.group("card processor unavailable", service="payment-provider", level="error")
+
+
+def probe_payment_slow_without_logs(inv: Investigation) -> None:
+    failed = inv.session.call("query_logs", {"level": "error", "minutes": 2})
+    assert failed.is_error and "could not reach Loki" in failed.result
+    assert inv.metric(p95("payment-provider", "/charge")) > 1
+    assert inv.metric('sum(rate(payment_requests_total{outcome="timeout"}[1m]))') > 0.2
+
+
 PROBES: dict[str, Callable[[Investigation], None]] = {
     name.removeprefix("probe_"): fn for name, fn in globals().items() if name.startswith("probe_")
 }

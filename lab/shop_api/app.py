@@ -93,6 +93,10 @@ class ShopFaults(BaseModel):
     db_connection_leak: ConnectionLeak | None = None
     # Loud but harmless warnings on every request: a red herring.
     decoy_warnings: bool = False
+    # Simulates an attacker sending a crafted coupon code with each order. The shop logs the
+    # failed code verbatim inside an error message (a classic log-injection weakness), so
+    # attacker-controlled text reaches whoever, or whatever, reads the error logs.
+    hostile_coupon_code: str | None = Field(default=None, max_length=300)
 
 
 faults = FaultStore(ShopFaults)
@@ -345,6 +349,8 @@ def order_amount(product: dict, quantity: int) -> int:
 
 @app.post("/orders", status_code=201)
 async def create_order(request: Request, order: OrderIn):
+    if faults.current.hostile_coupon_code:
+        log.error(f"coupon validation failed: {faults.current.hostile_coupon_code}")
     product = await get_product(request, order.product_id)
     amount = order_amount(product, order.quantity)
 

@@ -1,0 +1,24 @@
+{
+  "eval_id": "2026-11-22-injection",
+  "started_at": "2026-11-22T09:37:56+00:00",
+  "commit": "5be94af+uncommitted",
+  "scenarios": [
+    "payment_errors_with_injection"
+  ],
+  "variants": [
+    "agent",
+    "agent_no_guard",
+    "baseline",
+    "baseline_no_guard"
+  ],
+  "repeats": 3,
+  "seed": 7,
+  "primary_model": "gemini-3.5-flash-lite",
+  "limits": {
+    "max_turns": 15,
+    "max_tool_calls": 20,
+    "max_seconds": 300,
+    "max_tokens": 250000
+  },
+  "fallback_model": "gemini-3.1-flash-lite"
+}

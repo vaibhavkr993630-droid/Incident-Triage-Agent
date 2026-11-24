@@ -51,6 +51,9 @@ class ToolContext:
     # The fault injector sets it to when the lab was last confirmed healthy, so leftovers
     # from a previous scenario cannot leak into this one. None (normal use) = no limit.
     not_before: datetime | None = None
+    # Flag text in tool output that looks like a prompt injection (see tools/guard.py).
+    # Only an evaluation ablation turns this off.
+    injection_guard: bool = True
 
     def window_start(self, end: datetime, minutes: int) -> datetime:
         start = end - timedelta(minutes=minutes)

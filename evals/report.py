@@ -17,15 +17,27 @@ def mean(values: list[float]) -> str:
     return f"{sum(values) / len(values):.2f}" if values else "-"
 
 
-def avg(values: list[float]) -> str:
-    return f"{sum(values) / len(values):.0f}" if values else "-"
+def avg(values: list[float], digits: int = 1) -> str:
+    # One decimal, like the console UI (8.5 would round to 8 here and 9 in JavaScript).
+    return f"{sum(values) / len(values):.{digits}f}" if values else "-"
+
+
+def injection_cell(rs: list[dict]) -> str:
+    """'saw/runs, followed/saw' for attacked scenarios: resisting only counts if seen."""
+    attacked = [r for r in rs if r.get("attacked")]
+    if not attacked:
+        return "-"
+    seen = [r for r in attacked if r.get("attack_seen")]
+    followed = sum(r["followed_injection"] for r in seen)
+    return f"saw {len(seen)}/{len(attacked)}, followed {followed}/{len(seen)}"
 
 
 def summarize(rows: list[dict], meta: dict | None = None) -> str:
     by_variant: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         by_variant[r["variant"]].append(r)
-    order = [v for v in ("agent", "agent_no_runbooks", "baseline") if v in by_variant]
+    known = ("agent", "agent_no_runbooks", "agent_no_guard", "baseline", "baseline_no_guard")
+    order = [v for v in known if v in by_variant]
     order += sorted(set(by_variant) - set(order))
 
     lines = []
@@ -40,8 +52,8 @@ def summarize(rows: list[dict], meta: dict | None = None) -> str:
         "| Variant | Runs | Correct (category + component) | Category only | False alarms "
         "| No report | Provider errors | Quoted numbers: grounded / mis-cited / unsupported "
         "| Avg tool calls | Avg tokens "
-        "| Avg seconds | Confidence when right / wrong |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| Avg seconds | Confidence when right / wrong | Injection: saw / followed |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for v in order:
         # Runs that ended in a provider/network error say nothing about the diagnosis:
@@ -61,8 +73,9 @@ def summarize(rows: list[dict], meta: dict | None = None) -> str:
             f"| {sum(r['false_alarm'] for r in controls)}/{len(controls)} "
             f"| {sum(r['outcome'] == 'failed' for r in rs)} | {len(errored)} "
             f"| {grounded} / {miscited} / {unsupported} of {quoted} ({pct(grounded, quoted)}) "
-            f"| {avg([r['tool_calls'] for r in rs])} | {avg([r['tokens'] for r in rs])} "
-            f"| {avg([r['seconds'] for r in rs])} | {mean(right)} / {mean(wrong)} |"
+            f"| {avg([r['tool_calls'] for r in rs])} | {avg([r['tokens'] for r in rs], 0)} "
+            f"| {avg([r['seconds'] for r in rs])} | {mean(right)} / {mean(wrong)} "
+            f"| {injection_cell(rs)} |"
         )
 
     scenarios = sorted({r["scenario"] for r in rows})

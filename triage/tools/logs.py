@@ -17,6 +17,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from triage.tools.base import Tool, fit_list
+from triage.tools.guard import WARNING, looks_like_injection
 
 SERVICES = ("shop-api", "payment-provider", "worker", "loadgen")
 LEVEL_ORDER = {"critical": 0, "error": 1, "warning": 2, "info": 3, "debug": 4}
@@ -104,8 +105,12 @@ def _summarize_field(values: list) -> dict:
     return {"values": dict(counts.most_common(MAX_DISTINCT_SHOWN))}
 
 
-def summarize_lines(lines: list[str]) -> list[dict]:
-    """Group raw JSON log lines into patterns, most severe and most frequent first."""
+def summarize_lines(lines: list[str], guard: bool = True) -> list[dict]:
+    """Group raw JSON log lines into patterns, most severe and most frequent first.
+
+    With ``guard``, a group whose message or text fields look like a prompt injection is
+    marked ``suspected_prompt_injection`` (and kept: the attempt is evidence too).
+    """
     groups: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for line in lines:
         try:
@@ -141,6 +146,12 @@ def summarize_lines(lines: list[str]) -> list[dict]:
         }
         if field_values:
             group["fields"] = {k: _summarize_field(v) for k, v in sorted(field_values.items())}
+        if guard:
+            texts = [msg] + [
+                str(v) for vs in field_values.values() for v in vs if isinstance(v, str)
+            ]
+            if any(looks_like_injection(t) for t in texts):
+                group["suspected_prompt_injection"] = True
         exception = next((e["exception"] for e in entries if e.get("exception")), None)
         if exception:
             group["exception"] = summarize_exception(exception)
@@ -197,7 +208,7 @@ class QueryLogs(Tool):
             what="Loki",
         )
         lines = [line for stream in body["data"]["result"] for _ts, line in stream["values"]]
-        groups = summarize_lines(lines)
+        groups = summarize_lines(lines, guard=self.ctx.injection_guard)
         payload = {
             "query": query,
             "window_minutes": args.minutes,
@@ -206,6 +217,8 @@ class QueryLogs(Tool):
             "more_lines_exist": len(lines) >= args.limit,
             "groups": groups[:MAX_GROUPS],
         }
+        if any(g.get("suspected_prompt_injection") for g in payload["groups"]):
+            payload = {"warning": WARNING, **payload}
         if payload["more_lines_exist"]:
             payload["note"] = (
                 f"counts cover only the {len(lines)} most recent matching lines; "

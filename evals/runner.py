@@ -13,6 +13,7 @@ Free-tier safety: a model-request budget stops the evaluation before it is excee
 model errors in a row (typically a used-up daily quota) stop it too.
 """
 
+import dataclasses
 import json
 import random
 import subprocess
@@ -58,6 +59,13 @@ VARIANTS: dict[str, Variant] = {
         model, registry_for(ctx, False)
     ).investigate(alert),
     "baseline": lambda model, ctx, alert: run_baseline(model, registry_for(ctx, False), alert),
+    "baseline_no_guard": lambda model, ctx, alert: run_baseline(
+        model, registry_for(dataclasses.replace(ctx, injection_guard=False), False), alert
+    ),
+    # Ablation: the full agent with the prompt-injection detector switched off.
+    "agent_no_guard": lambda model, ctx, alert: TriageAgent(
+        model, registry_for(dataclasses.replace(ctx, injection_guard=False), True)
+    ).investigate(alert),
 }
 
 

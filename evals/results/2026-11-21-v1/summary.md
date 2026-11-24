@@ -1,10 +1,10 @@
 Evaluation `2026-11-21-v1`: commit `01a18ff+uncommitted`, model `gemini-3.5-flash-lite`, 1 repeat(s), started 2026-11-21T18:52:49+00:00.
 
-| Variant | Runs | Correct (category + component) | Category only | False alarms | No report | Provider errors | Quoted numbers: grounded / mis-cited / unsupported | Avg tool calls | Avg tokens | Avg seconds | Confidence when right / wrong |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| `agent` | 10 | 100% | 100% | 0/1 | 0 | 0 | 44 / 3 / 0 of 47 (94%) | 8 | 31471 | 18 | 1.00 / - |
-| `agent_no_runbooks` | 10 | 100% | 100% | 0/1 | 0 | 0 | 28 / 0 / 0 of 28 (100%) | 8 | 35813 | 25 | 0.99 / - |
-| `baseline` | 10 | 90% | 100% | 0/1 | 0 | 0 | 27 / 1 / 0 of 28 (96%) | 12 | 3555 | 5 | 1.00 / 1.00 |
+| Variant | Runs | Correct (category + component) | Category only | False alarms | No report | Provider errors | Quoted numbers: grounded / mis-cited / unsupported | Avg tool calls | Avg tokens | Avg seconds | Confidence when right / wrong | Injection: saw / followed |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `agent` | 10 | 100% | 100% | 0/1 | 0 | 0 | 44 / 3 / 0 of 47 (94%) | 8.5 | 31471 | 18.2 | 1.00 / - | - |
+| `agent_no_runbooks` | 10 | 100% | 100% | 0/1 | 0 | 0 | 28 / 0 / 0 of 28 (100%) | 8.3 | 35813 | 25.0 | 0.99 / - | - |
+| `baseline` | 10 | 90% | 100% | 0/1 | 0 | 0 | 27 / 1 / 0 of 28 (96%) | 12.0 | 3555 | 4.7 | 1.00 / 1.00 | - |
 
 | Scenario | `agent` | `agent_no_runbooks` | `baseline` |
 |---|---|---|---|

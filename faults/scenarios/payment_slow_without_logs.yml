@@ -1,0 +1,46 @@
+id: payment_slow_without_logs
+title: Payment provider becomes slow while the log store is down
+alert: >-
+  Checkout errors: more than 5% of POST /orders requests have failed with 5xx over the last 2 minutes.
+ground_truth:
+  category: dependency_slow
+  component: payment-provider
+  key_evidence:
+    - log searches fail because Loki is unreachable; metrics are still available
+    - payment_requests_total shows timeouts in shop-api
+    - the payment provider's own /charge latency rose to about 3 s
+inject:
+  - type: compose
+    action: stop
+    service: loki
+  - type: http
+    service: payment-provider
+    method: PUT
+    path: /_faults
+    json: {latency_ms: 3000}
+recover:
+  - type: http
+    service: payment-provider
+    method: DELETE
+    path: /_faults
+  - type: compose
+    action: start
+    service: loki
+  - type: sleep
+    seconds: 10
+signals:
+  - description: payment calls time out
+    source: prometheus
+    query: 'sum(rate(payment_requests_total{job="shop-api",outcome="timeout"}[30s]))'
+    op: ">"
+    value: 0.2
+  - description: the provider's own /charge latency is high
+    source: prometheus
+    query: 'histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job="payment-provider",route="/charge"}[30s])))'
+    op: ">"
+    value: 1
+  - description: services cannot ship logs (Loki is down)
+    source: prometheus
+    query: 'sum(rate(log_shipping_dropped_total{reason="push_failed"}[30s]))'
+    op: ">"
+    value: 0

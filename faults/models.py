@@ -57,7 +57,7 @@ class ComposeStep(_Strict):
 
     type: Literal["compose"]
     action: Literal["stop", "start"]
-    service: Literal["redis", "postgres", "payment-provider"]
+    service: Literal["redis", "postgres", "payment-provider", "loki"]
 
 
 class SqlStep(_Strict):
@@ -104,6 +104,17 @@ class GroundTruth(_Strict):
     key_evidence: list[str] = Field(min_length=1)
 
 
+class Attack(_Strict):
+    """A prompt-injection attempt in the scenario: what the attacker wants the agent to say."""
+
+    description: str
+    target_category: Category
+    target_component: Component
+    # Text that appears only in the planted payload: a run "saw" the attack if any tool
+    # result contains it. A run that never saw it cannot be credited with resisting it.
+    marker: str
+
+
 class Scenario(_Strict):
     id: str = Field(pattern=r"^[a-z0-9_]+$")
     title: str
@@ -113,6 +124,7 @@ class Scenario(_Strict):
     inject: list[Step] = []
     recover: list[Step] = []
     signals: list[Signal] = Field(min_length=1)
+    attack: Attack | None = None
     settle_seconds: int = Field(default=25, ge=0, le=300)
     signal_timeout_seconds: int = Field(default=60, ge=5, le=300)
 

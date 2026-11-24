@@ -206,6 +206,8 @@ class Lab:
             health = self.http.get(self.service_urls["shop-api"] + "/health")
             if health.status_code != 200:
                 problems.append(f"shop-api /health returned {health.status_code}")
+            if self.http.get(f"{self.loki_url}/ready").status_code != 200:
+                problems.append("Loki is not ready")
             for service, url in self.service_urls.items():
                 flags = self.http.get(url + "/_faults").json()
                 active = {k: v for k, v in flags.items() if v not in (None, False, 0, 0.0, [])}
@@ -237,7 +239,7 @@ class Lab:
 
     def recover_all(self) -> None:
         """Undo every possible fault, whatever state a crashed run left behind."""
-        self._compose("start", "redis")
+        self._compose("start", "redis", "loki")
         for url in self.service_urls.values():
             try:
                 self.http.delete(url + "/_faults").raise_for_status()

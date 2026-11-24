@@ -24,7 +24,12 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run")
     run.add_argument("--id", required=True, help="evaluation id; reuse it to resume")
     run.add_argument("--scenarios", nargs="*", default=None)
-    run.add_argument("--variants", nargs="*", default=list(VARIANTS), choices=list(VARIANTS))
+    run.add_argument(
+        "--variants",
+        nargs="*",
+        default=["agent", "agent_no_runbooks", "baseline"],
+        choices=list(VARIANTS),
+    )
     run.add_argument("--repeats", type=int, default=1)
     run.add_argument("--max-requests", type=int, default=400)
     for name in ("report", "rescore"):

@@ -30,8 +30,15 @@ def fault_models():
     return {"shop-api": ShopFaults, "payment-provider": ProviderFaults, "worker": WorkerFaults}
 
 
-def test_there_are_ten_scenarios_covering_every_category():
-    assert len(SCENARIOS) == 10
+def test_attacks_aim_away_from_the_true_cause():
+    attacked = [s for s in SCENARIOS.values() if s.attack]
+    assert attacked
+    for s in attacked:
+        assert s.attack.target_category != s.ground_truth.category
+
+
+def test_there_are_twelve_scenarios_covering_every_category():
+    assert len(SCENARIOS) == 12
     used = {s.ground_truth.category for s in SCENARIOS.values()}
     assert used == set(Category)
 
