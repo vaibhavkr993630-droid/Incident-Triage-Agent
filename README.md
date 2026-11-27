@@ -242,6 +242,35 @@ uv run python -m faults recover payment_slow
 Every run is saved as a JSON trace in `runs/`: each model turn (latency, tokens, retries),
 each tool call with its full result, and the report.
 
+## Investigation console
+
+A small web console (`web/`, React + TypeScript + Vite) over a FastAPI backend
+(`triage/api.py`) shows what the agent did and why.
+
+![An investigation in the console: the planted prompt injection is flagged and ruled out](docs/images/console-investigation.png)
+
+- **Investigations:** every saved run, with its verdict, outcome and cost.
+- **Investigation detail:** the alert, the report, and a timeline of every model turn
+  (model, latency, retries, tokens) and every tool call (arguments, duration, full result).
+  Each evidence item links to the tool call it cites; cited calls, failed calls and results
+  flagged as suspected prompt injection are marked.
+- **Evaluations:** the score table per variant, and a scenario-by-variant matrix in which
+  every verdict links to its investigation.
+- **New investigation:** start one from an alert text (live mode only; this calls the model).
+
+![An evaluation in the console](docs/images/console-evaluation.png)
+
+```bash
+uv run uvicorn triage.api:app --port 8100     # API; also serves web/dist if it was built
+cd web && npm install && npm run dev          # http://localhost:5173, proxies /api to :8100
+```
+
+**Static demo mode.** `uv run python -m triage.export` writes the saved investigations and
+evaluations as JSON files that mirror the API, and `npm run build:static` builds a read-only
+console that reads those files. It needs no backend, no lab and no model key, so it can be
+hosted on any static host. The exporter calls the real API code, so the files cannot drift
+from what the live console shows.
+
 ## Evaluation
 
 `evals/` runs every fault scenario against three variants on the same model and scores each
